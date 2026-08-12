@@ -44,6 +44,7 @@ export function createMonitor({
   let running = true;
   let firstTick = true;           // §6: don't inherit a previous session's banner
   let leaseSeen = false;          // F4: enforce lease-gone exit only after first sighting
+  let firstTicksWithoutLease = 0; // Prevent zombie monitors if lease never appears
 
   function markerPath() {
     return join(EVENTS_DIR, `${addressHash({ mux: muxName, paneOwner, pane })}.json`);
@@ -225,11 +226,20 @@ export function createMonitor({
     // only once the lease has been seen.
     if (leaseId) {
       const lease = readLease({ mux: muxName, paneOwner, pane }, leaseId);
-      if (lease) leaseSeen = true;
-      else if (leaseSeen) {
+      if (lease) {
+        leaseSeen = true;
+        firstTicksWithoutLease = 0;
+      } else if (leaseSeen) {
         log(`pane ${pane}: lease ${leaseId} gone — agent exited, monitor exiting`);
         running = false;
         return;
+      } else {
+        firstTicksWithoutLease++;
+        if (firstTicksWithoutLease > 6) {
+          log(`pane ${pane}: lease ${leaseId} never appeared — monitor exiting`);
+          running = false;
+          return;
+        }
       }
     }
 

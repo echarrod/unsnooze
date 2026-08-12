@@ -2,7 +2,7 @@
 // Never auto-kills a live agent pane unless the user opts in via reapResumed.
 
 import { MUX_SESSION_NAME, RESUME_SESSION_NAME } from './config.js';
-import { getMultiplexer } from './multiplexer.js';
+import { getMultiplexer, NAMES } from './multiplexer.js';
 import { readState, setStatus, updateState } from './state.js';
 import { getConfig } from './settings.js';
 import { paneOwnedByRecord } from './lease.js';
@@ -31,7 +31,7 @@ export function isUnsnoozeSessionName(name, base = MUX_SESSION_NAME) {
 }
 
 export async function listOwnedSessions({ muxName = null } = {}) {
-  const names = muxName ? [muxName] : ['tmux', 'zellij', 'herdr'];
+  const names = muxName ? [muxName] : NAMES;
   const out = [];
   for (const name of names) {
     let mux;
@@ -151,7 +151,7 @@ export async function reap({
   }
 
   // Empty / EXITED unsnooze-owned sessions.
-  for (const name of ['tmux', 'zellij', 'herdr']) {
+  for (const name of NAMES) {
     let mux;
     try { mux = getMultiplexer(name); } catch { continue; }
     if (!mux.available?.() || typeof mux.listSessions !== 'function') continue;

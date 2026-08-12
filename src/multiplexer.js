@@ -3,7 +3,7 @@ import zellij from './multiplexers/zellij.js';
 import herdr from './multiplexers/herdr.js';
 import { getConfig } from './settings.js';
 
-const NAMES = ['tmux', 'zellij', 'herdr'];
+export const NAMES = ['tmux', 'zellij', 'herdr'];
 
 export function createMultiplexerFactory({
   backends = { tmux, zellij, herdr },
