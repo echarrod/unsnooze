@@ -1611,16 +1611,23 @@ test('herdr: two panes claiming one session are deferred, not guessed', async ()
   assert.equal(mux.calls.windows, 0);
 });
 
-test('herdr: surviving shell pane is never typed into; falls back to a new tab', async () => {
+test('herdr: surviving shell pane is never typed into and gets no duplicate tab', async () => {
   const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
   const mux = herdrFake({
     matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null }],
     text: 'ed@mac ~/proj % ', cmd: 'zsh',
   });
-  // 'retry': the fake new pane never shows a prompt, so the ready-wait times out.
-  assert.ok(['reopen', 'retry'].includes(await dispatchOne(rec, { mux })));
+  assert.equal(await dispatchOne(rec, { mux }), 'busy');
   assert.equal(mux.calls.sent.length, 0);
-  assert.equal(mux.calls.windows, 1);
+  assert.equal(mux.calls.windows, 0);
+});
+
+test('herdr: unreadable lookup defers instead of opening a duplicate tab', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({ matches: [] });
+  mux.findSessionPanes = async () => { throw new Error('pane list failed'); };
+  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(mux.calls.windows, 0);
 });
 
 test('herdr: the pane\'s own stamp is adopted as the record lease', async () => {
