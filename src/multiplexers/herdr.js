@@ -544,6 +544,33 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
         }
       },
 
+      // Every live pane, in every running session, whose agent reports this
+      // conversation id. herdr tracks `agent_session` per pane, so this finds a
+      // session that is still open somewhere even when unsnooze never recorded
+      // its pane (transcript-only detection) or recorded a stale id. The cwd is
+      // deliberately not consulted: several conversations share a repository.
+      async findSessionPanes(sessionId, { agent = null } = {}) {
+        if (!sessionId) return [];
+        const found = [];
+        for (const row of await backend.listSessions()) {
+          if (row.exited) continue;
+          let panes;
+          try { panes = await listPaneRows(row.name); } catch { continue; }
+          for (const entry of panes) {
+            const identity = entry?.agent_session;
+            if (!identity || identity.value !== sessionId || !entry.pane_id) continue;
+            if (agent && identity.agent && identity.agent !== agent) continue;
+            found.push({
+              pane: String(entry.pane_id),
+              paneOwner: row.name,
+              status: entry.agent_status ?? null,
+              stamp: entry.tokens?.unsnooze_owner ?? null,
+            });
+          }
+        }
+        return found;
+      },
+
       async closePane(pane) {
         await owned('pane', 'close', String(pane));
       },
