@@ -552,14 +552,15 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
       async findSessionPanes(sessionId, { agent = null } = {}) {
         if (!sessionId) return [];
         const found = [];
+        let failure = null;
         for (const row of await backend.listSessions()) {
           if (row.exited) continue;
           let panes;
-          try { panes = await listPaneRows(row.name); } catch { continue; }
+          try { panes = await listPaneRows(row.name); } catch (err) { failure ??= err; continue; }
           for (const entry of panes) {
             const identity = entry?.agent_session;
             if (!identity || identity.value !== sessionId || !entry.pane_id) continue;
-            if (agent && identity.agent && identity.agent !== agent) continue;
+            if (agent && identity.agent !== agent) continue;
             found.push({
               pane: String(entry.pane_id),
               paneOwner: row.name,
@@ -568,6 +569,9 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
             });
           }
         }
+        // An unreadable session may hold the conversation: not finding it
+        // there must not read as "no such pane" and open a duplicate.
+        if (failure && found.length === 0) throw failure;
         return found;
       },
 

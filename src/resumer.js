@@ -600,7 +600,7 @@ export async function planFor(rec, {
   }
   const { matches } = await lookupExistingPane(rec, agent, mux);
   if (matches.length === 1) {
-    gates.push(`found existing pane ${matches[0].paneOwner}:${matches[0].pane} by session id — would resume there, no new tab`);
+    gates.push(`found existing pane ${matches[0].paneOwner}:${matches[0].pane} by session id — would resume there if idle (no new tab)`);
     return { ...base, action: 'inject', target: { pane: matches[0].pane, session: matches[0].paneOwner }, message };
   }
   if (matches.length > 1) {
@@ -639,18 +639,20 @@ async function lookupExistingPane(rec, agent, mux) {
     return { finder, matches: await finder.findSessionPanes(rec.sessionId, { agent: agent.id }) };
   } catch (err) {
     log(`${rec.key}: existing-pane lookup failed: ${err.message}`);
-    return { finder, matches: [] };
+    return { finder, matches: [], failed: true };
   }
 }
 
 // Point the stop at the pane that already holds the conversation so the normal
 // live-pane gates (busy, menu, idle prompt, ownership) decide what happens.
-// Adopting the pane's own stamp as the lease keeps the identity veto intact: a
-// pane stamped by another launch of ours is still refused. Returns the updated
+// The pane's own stamp becomes the record's lease: the proof of identity here
+// is the exact agent session id plus the agent still running in the pane (a
+// shell is refused downstream), not a lease from the old pane. Returns the updated
 // record, 'defer' when more than one pane claims the session (never guess), or
 // null when there is nothing safe to adopt and the caller should reopen.
 async function adoptExistingPane(rec, agent, mux) {
-  const { finder, matches } = await lookupExistingPane(rec, agent, mux);
+  const { finder, matches, failed } = await lookupExistingPane(rec, agent, mux);
+  if (failed) return 'defer';
   if (matches.length === 0) return null;
   if (matches.length > 1) {
     log(`${rec.key}: ${matches.length} panes claim this session (${matches.map(m => `${m.paneOwner}:${m.pane}`).join(', ')}) — deferring rather than guessing`);
@@ -681,7 +683,7 @@ export async function dispatchOne(rec, {
   mux = resolveRecordMux(rec), resolveMux = null,
   resumeMessage, selfCmd = selfCommand(), fingerprint = workspaceFingerprint,
   notifier = notify, matchesLease = leaseMatches, contextTokens = null,
-  adoptExisting = true,
+  adoptExisting = true, adopted = false,
 } = {}) {
   resolveMux ||= () => mux;
   const key = rec.key;
@@ -749,13 +751,19 @@ export async function dispatchOne(rec, {
   // Before opening a new tab, look for the conversation's own pane. The
   // retry re-enters with adoptExisting off so it cannot loop.
   const reopenGuarded = async () => {
+    // An adopted pane that is not safe to type into (a shell, a refused menu)
+    // still holds the conversation: a new tab would clone it.
+    if (adopted) {
+      log(`${key}: existing pane holds this session but is not safe to resume into — deferring, no new tab`);
+      return 'busy';
+    }
     if (adoptExisting) {
       const found = await adoptExistingPane(rec, agent, mux);
       if (found === 'defer') return 'busy';
       if (found) {
         return dispatchOne(found.rec, {
           mux: found.mux, resolveMux, resumeMessage: baseMessage, selfCmd,
-          fingerprint, notifier, matchesLease, contextTokens, adoptExisting: false,
+          fingerprint, notifier, matchesLease, contextTokens, adoptExisting: false, adopted: true,
         });
       }
     }
