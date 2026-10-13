@@ -1549,3 +1549,93 @@ test('awaitReadyAndSend: capturePane throwing keeps polling instead of crashing'
   assert.equal(outcome, 'timeout');
   assert.ok(calls >= 1, 'capturePane was polled despite throwing');
 });
+
+// --- existing-pane recovery (herdr, found by agent session id) ---
+
+function herdrFake({ matches, text = '❯ \n', cmd = 'node', stamp = undefined }) {
+  const calls = { sent: [], windows: 0 };
+  const mux = {
+    calls,
+    findSessionPanes: async () => matches,
+    bind() { return mux; },
+    paneAlive: async () => true,
+    paneCurrentCommand: async () => cmd,
+    paneOwnerStamp: async () => stamp ?? null,
+    capturePane: async () => text,
+    sendText: async (pane, msg) => calls.sent.push({ pane, msg }),
+    sessionExists: async () => true,
+    newWindow: async () => { calls.windows += 1; return { pane: 'w9:p9', paneOwner: 'default' }; },
+  };
+  return mux;
+}
+
+test('herdr: transcript-only stop resumes in the existing pane, no new tab', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null, muxSession: null });
+  const mux = herdrFake({ matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null }] });
+  assert.equal(await dispatchOne(rec, { mux }), 'injected');
+  assert.deepEqual(mux.calls.sent.map(s => s.pane), ['w1:p4']);
+  assert.equal(mux.calls.windows, 0);
+  const saved = readState().sessions[rec.key];
+  assert.equal(saved.pane, 'w1:p4');
+  assert.equal(saved.paneOwner, 'default');
+});
+
+test('herdr: stale recorded pane id is replaced by the live one', async () => {
+  const rec = seed({ mux: 'herdr', pane: 'w1:p1', paneOwner: 'default' });
+  const mux = herdrFake({ matches: [{ pane: 'w2:p7', paneOwner: 'other', status: 'idle', stamp: null }] });
+  mux.paneAlive = async pane => pane === 'w2:p7';
+  assert.equal(await dispatchOne(rec, { mux }), 'injected');
+  assert.deepEqual(mux.calls.sent.map(s => s.pane), ['w2:p7']);
+  assert.equal(mux.calls.windows, 0);
+});
+
+test('herdr: matching agent that is busy is deferred, never duplicated', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({
+    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'working', stamp: null }],
+    text: '✻ Thinking… (esc to interrupt)',
+  });
+  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(mux.calls.sent.length, 0);
+  assert.equal(mux.calls.windows, 0);
+});
+
+test('herdr: two panes claiming one session are deferred, not guessed', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({ matches: [
+    { pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null },
+    { pane: 'w3:p2', paneOwner: 'default', status: 'idle', stamp: null },
+  ] });
+  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(mux.calls.sent.length, 0);
+  assert.equal(mux.calls.windows, 0);
+});
+
+test('herdr: surviving shell pane is never typed into; falls back to a new tab', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({
+    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null }],
+    text: 'ed@mac ~/proj % ', cmd: 'zsh',
+  });
+  // 'retry': the fake new pane never shows a prompt, so the ready-wait times out.
+  assert.ok(['reopen', 'retry'].includes(await dispatchOne(rec, { mux })));
+  assert.equal(mux.calls.sent.length, 0);
+  assert.equal(mux.calls.windows, 1);
+});
+
+test('herdr: the pane\'s own stamp is adopted as the record lease', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({
+    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: 'someone-else' }],
+  });
+  mux.paneOwnerStamp = async () => 'someone-else';
+  assert.equal(await dispatchOne(rec, { mux }), 'injected');
+  assert.equal(readState().sessions[rec.key].leaseId, 'someone-else');
+});
+
+test('herdr: no matching session → new-tab fallback is kept', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({ matches: [] });
+  assert.equal(await dispatchOne(rec, { mux }), 'reopen');
+  assert.equal(mux.calls.windows, 1);
+});

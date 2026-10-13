@@ -598,6 +598,15 @@ export async function planFor(rec, {
       + ' knows its session id — reviving both would clone the conversation');
     return { ...base, action: 'superseded', target: { key: superseded.key } };
   }
+  const { matches } = await lookupExistingPane(rec, agent, mux);
+  if (matches.length === 1) {
+    gates.push(`found existing pane ${matches[0].paneOwner}:${matches[0].pane} by session id — would resume there, no new tab`);
+    return { ...base, action: 'inject', target: { pane: matches[0].pane, session: matches[0].paneOwner }, message };
+  }
+  if (matches.length > 1) {
+    gates.push(`${matches.length} panes claim this session — dispatch defers rather than guess`);
+    return { ...base, action: 'busy', target: { pane: rec.pane } };
+  }
   const target = await reviveTarget(mux, rec);
   // The same argv reopen() builds: on a backend with no pane the prompt rides
   // in argv, and for codex the command itself changes (`exec resume`).
@@ -609,12 +618,70 @@ export async function planFor(rec, {
   };
 }
 
+// An existing pane that already holds this conversation, found by agent
+// session id (never by cwd). Only multiplexers that expose findSessionPanes
+// (herdr) can answer; a record with no recorded mux is also tried against herdr
+// when it is installed, since transcript detection never learns the pane.
+function existingPaneFinder(rec, mux) {
+  if (!rec.sessionId) return null;
+  if (typeof mux?.findSessionPanes === 'function') return mux;
+  if (rec.mux && rec.mux !== 'herdr') return null;
+  try {
+    const herdr = getMultiplexer('herdr');
+    return herdr.available() ? herdr : null;
+  } catch { return null; }
+}
+
+async function lookupExistingPane(rec, agent, mux) {
+  const finder = existingPaneFinder(rec, mux);
+  if (!finder) return { finder: null, matches: [] };
+  try {
+    return { finder, matches: await finder.findSessionPanes(rec.sessionId, { agent: agent.id }) };
+  } catch (err) {
+    log(`${rec.key}: existing-pane lookup failed: ${err.message}`);
+    return { finder, matches: [] };
+  }
+}
+
+// Point the stop at the pane that already holds the conversation so the normal
+// live-pane gates (busy, menu, idle prompt, ownership) decide what happens.
+// Adopting the pane's own stamp as the lease keeps the identity veto intact: a
+// pane stamped by another launch of ours is still refused. Returns the updated
+// record, 'defer' when more than one pane claims the session (never guess), or
+// null when there is nothing safe to adopt and the caller should reopen.
+async function adoptExistingPane(rec, agent, mux) {
+  const { finder, matches } = await lookupExistingPane(rec, agent, mux);
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    log(`${rec.key}: ${matches.length} panes claim this session (${matches.map(m => `${m.paneOwner}:${m.pane}`).join(', ')}) — deferring rather than guessing`);
+    return 'defer';
+  }
+  const [hit] = matches;
+  if (hit.pane === rec.pane && hit.paneOwner === rec.paneOwner) return null;
+  const cutoff = stopEpisodeAt(rec);
+  let adopted = null;
+  updateState(state => {
+    const current = state.sessions[rec.key];
+    if (current?.status !== 'stopped' || stopEpisodeAt(current) !== cutoff) return state;
+    Object.assign(current, {
+      mux: 'herdr', pane: hit.pane, paneOwner: hit.paneOwner, muxSession: hit.paneOwner,
+      leaseId: hit.stamp,
+    });
+    adopted = { ...current };
+    return state;
+  });
+  if (!adopted) return null;
+  log(`${rec.key}: found existing herdr pane ${hit.paneOwner}:${hit.pane} by session id — resuming there`);
+  return { rec: adopted, mux: finder.bind ? finder.bind(hit.paneOwner) : finder };
+}
+
 // Ordered safety decision. Returns: already-resumed | busy | retry | progress |
 // held | injected | reopen | probe.
 export async function dispatchOne(rec, {
   mux = resolveRecordMux(rec), resolveMux = null,
   resumeMessage, selfCmd = selfCommand(), fingerprint = workspaceFingerprint,
   notifier = notify, matchesLease = leaseMatches, contextTokens = null,
+  adoptExisting = true,
 } = {}) {
   resolveMux ||= () => mux;
   const key = rec.key;
@@ -626,6 +693,8 @@ export async function dispatchOne(rec, {
   // explicit option → per-agent (`resumeMessages.<id>`) → global. Applies to
   // both the live-pane sendText and the argv reopen path.
   resumeMessage = rec.resumeMessage ?? resumeMessage ?? resolveResumeMessage(agent.id);
+  // Guards below suffix the message; an adopted-pane retry re-runs them from the original.
+  const baseMessage = resumeMessage;
 
   // §4: fallback records probe cheaply before a real resume attempt.
   if (rec.resetSource === 'fallback' && !rec.manual) {
@@ -677,8 +746,21 @@ export async function dispatchOne(rec, {
   const notifyContext = () => {
     if (contextNote) notifier('unsnooze: big-context wake', contextNote, { context: ctxOf(rec) });
   };
-  const reopenGuarded = () =>
-    reopen(rec, { mux, resolveMux, agent, resumeMessage, selfCmd, onDelivered: notifyContext });
+  // Before opening a new tab, look for the conversation's own pane. The
+  // retry re-enters with adoptExisting off so it cannot loop.
+  const reopenGuarded = async () => {
+    if (adoptExisting) {
+      const found = await adoptExistingPane(rec, agent, mux);
+      if (found === 'defer') return 'busy';
+      if (found) {
+        return dispatchOne(found.rec, {
+          mux: found.mux, resolveMux, resumeMessage: baseMessage, selfCmd,
+          fingerprint, notifier, matchesLease, contextTokens, adoptExisting: false,
+        });
+      }
+    }
+    return reopen(rec, { mux, resolveMux, agent, resumeMessage, selfCmd, onDelivered: notifyContext });
+  };
 
   // Live-pane path: classification comes from the shared assessPane (planFor
   // narrates the identical assessment); dispatch owns every side effect.
