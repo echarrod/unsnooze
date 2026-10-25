@@ -1600,15 +1600,18 @@ test('herdr: matching agent that is busy is deferred, never duplicated', async (
   assert.equal(mux.calls.windows, 0);
 });
 
-test('herdr: two panes claiming one session are deferred, not guessed', async () => {
+test('herdr: two panes claiming one session fail the record instead of guessing', async () => {
   const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
   const mux = herdrFake({ matches: [
     { pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null },
     { pane: 'w3:p2', paneOwner: 'default', status: 'idle', stamp: null },
   ] });
-  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(await dispatchOne(rec, { mux }), 'skipped');
   assert.equal(mux.calls.sent.length, 0);
   assert.equal(mux.calls.windows, 0);
+  const saved = readState().sessions[rec.key];
+  assert.equal(saved.status, 'failed');
+  assert.match(saved.lastError, /found 2 herdr panes/);
 });
 
 test('herdr: surviving shell pane is never typed into and gets no duplicate tab', async () => {
@@ -1617,27 +1620,42 @@ test('herdr: surviving shell pane is never typed into and gets no duplicate tab'
     matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: null }],
     text: 'ed@mac ~/proj % ', cmd: 'zsh',
   });
+  assert.equal(await dispatchOne(rec, { mux }), 'skipped');
+  assert.equal(mux.calls.sent.length, 0);
+  assert.equal(mux.calls.windows, 0);
+  const saved = readState().sessions[rec.key];
+  assert.equal(saved.status, 'failed');
+  assert.match(saved.lastError, /has exited/);
+});
+
+test('herdr: unreadable lookup is a charged retry, not a duplicate tab', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({ matches: [] });
+  mux.findSessionPanes = async () => { throw new Error('pane list failed'); };
+  assert.equal(await dispatchOne(rec, { mux }), 'retry');
+  assert.equal(mux.calls.windows, 0);
+  assert.match(readState().sessions[rec.key].lastError, /existing-pane lookup: pane list failed/);
+});
+
+test('herdr: a pane stamped by another unsnooze owner is left to that owner', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null, leaseId: 'mine' });
+  const mux = herdrFake({
+    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: 'someone-else' }],
+  });
+  mux.paneOwnerStamp = async () => 'someone-else';
   assert.equal(await dispatchOne(rec, { mux }), 'busy');
   assert.equal(mux.calls.sent.length, 0);
   assert.equal(mux.calls.windows, 0);
 });
 
-test('herdr: unreadable lookup defers instead of opening a duplicate tab', async () => {
-  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
-  const mux = herdrFake({ matches: [] });
-  mux.findSessionPanes = async () => { throw new Error('pane list failed'); };
-  assert.equal(await dispatchOne(rec, { mux }), 'busy');
-  assert.equal(mux.calls.windows, 0);
-});
-
-test('herdr: the pane\'s own stamp is adopted as the record lease', async () => {
-  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+test('herdr: a pane stamped with this record\'s own lease is adopted', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null, leaseId: 'mine' });
   const mux = herdrFake({
-    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: 'someone-else' }],
+    matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: 'mine' }],
   });
-  mux.paneOwnerStamp = async () => 'someone-else';
+  mux.paneOwnerStamp = async () => 'mine';
   assert.equal(await dispatchOne(rec, { mux }), 'injected');
-  assert.equal(readState().sessions[rec.key].leaseId, 'someone-else');
+  assert.equal(readState().sessions[rec.key].leaseId, 'mine');
 });
 
 test('herdr: no matching session → new-tab fallback is kept', async () => {
