@@ -1675,3 +1675,11 @@ test('herdr: unsafe pane already on the record gives up instead of opening a clo
   assert.equal(mux.calls.windows, 0);
   assert.equal(readState().sessions[rec.key].status, 'failed');
 });
+
+test('herdr: a pane herdr reports as working is deferred even if the screen looks idle', async () => {
+  const rec = seed({ mux: 'herdr', pane: null, paneOwner: null });
+  const mux = herdrFake({ matches: [{ pane: 'w6:p6', paneOwner: 'default', status: 'working', stamp: null }] });
+  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(mux.calls.sent.length, 0);
+  assert.equal(mux.calls.windows, 0);
+});

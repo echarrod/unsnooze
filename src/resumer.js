@@ -613,6 +613,10 @@ export async function planFor(rec, {
       gates.push(`existing pane ${hit.paneOwner}:${hit.pane} is owned by another unsnooze — deferring to it`);
       return { ...base, action: 'busy', target: { pane: hit.pane } };
     }
+    if (hit.status === 'working') {
+      gates.push(`existing pane ${hit.paneOwner}:${hit.pane} holds this session and herdr reports it working — deferring`);
+      return { ...base, action: 'busy', target: { pane: hit.pane } };
+    }
     gates.push(`found existing pane ${hit.paneOwner}:${hit.pane} by session id — would resume there if idle (no new tab)`);
     return { ...base, action: 'inject', target: { pane: hit.pane, session: hit.paneOwner }, message };
   }
@@ -703,6 +707,8 @@ async function adoptExistingPane(rec, agent, mux, notifier) {
     }, { expect: ['stopped'] })) return { outcome: 'stale' };
     return { outcome: 'retry' };
   }
+  // herdr's own agent status catches a busy agent the screen scrape can miss.
+  if (hit.status === 'working') return { outcome: 'busy' };
   // Already pointed at it and it was not safe to resume: a new tab would clone it.
   if (hit.pane === rec.pane && hit.paneOwner === rec.paneOwner) {
     return { outcome: giveUpOnExistingPane(rec,
