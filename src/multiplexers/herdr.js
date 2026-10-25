@@ -524,15 +524,17 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
       },
 
       async listSessions() {
-        try {
-          const result = parseResult(await run(['session', 'list', '--json']));
-          const rows = Array.isArray(result?.sessions) ? result.sessions : [];
-          return rows
-            .filter(row => typeof row?.name === 'string' && row.name)
-            .map(row => ({ name: row.name, exited: row.running === false }));
-        } catch {
-          return [];
-        }
+        try { return await backend.readSessions(); } catch { return []; }
+      },
+
+      // listSessions, but a failed `session list` throws instead of reading as
+      // "no sessions".
+      async readSessions() {
+        const result = parseResult(await run(['session', 'list', '--json']));
+        const rows = Array.isArray(result?.sessions) ? result.sessions : [];
+        return rows
+          .filter(row => typeof row?.name === 'string' && row.name)
+          .map(row => ({ name: row.name, exited: row.running === false }));
       },
 
       async listSessionPanes(sessionName) {
@@ -553,7 +555,7 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
         if (!sessionId) return [];
         const found = [];
         let failure = null;
-        for (const row of await backend.listSessions()) {
+        for (const row of await backend.readSessions()) {
           if (row.exited) continue;
           let panes;
           try { panes = await listPaneRows(row.name); } catch (err) { failure ??= err; continue; }
@@ -569,9 +571,9 @@ export function createHerdr({ spawner = defaultSpawner, env = process.env } = {}
             });
           }
         }
-        // An unreadable session may hold the conversation: not finding it
-        // there must not read as "no such pane" and open a duplicate.
-        if (failure && found.length === 0) throw failure;
+        // An unreadable session may hold the conversation (or a second pane
+        // for it): a partial answer must not read as "no other pane".
+        if (failure) throw failure;
         return found;
       },
 

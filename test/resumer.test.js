@@ -1625,7 +1625,7 @@ test('herdr: surviving shell pane is never typed into and gets no duplicate tab'
   assert.equal(mux.calls.windows, 0);
   const saved = readState().sessions[rec.key];
   assert.equal(saved.status, 'failed');
-  assert.match(saved.lastError, /has exited/);
+  assert.match(saved.lastError, /no longer runs the agent/);
 });
 
 test('herdr: unreadable lookup is a charged retry, not a duplicate tab', async () => {
@@ -1643,7 +1643,7 @@ test('herdr: a pane stamped by another unsnooze owner is left to that owner', as
     matches: [{ pane: 'w1:p4', paneOwner: 'default', status: 'idle', stamp: 'someone-else' }],
   });
   mux.paneOwnerStamp = async () => 'someone-else';
-  assert.equal(await dispatchOne(rec, { mux }), 'busy');
+  assert.equal(await dispatchOne(rec, { mux }), 'retry');
   assert.equal(mux.calls.sent.length, 0);
   assert.equal(mux.calls.windows, 0);
 });
@@ -1663,4 +1663,15 @@ test('herdr: no matching session → new-tab fallback is kept', async () => {
   const mux = herdrFake({ matches: [] });
   assert.equal(await dispatchOne(rec, { mux }), 'reopen');
   assert.equal(mux.calls.windows, 1);
+});
+
+test('herdr: unsafe pane already on the record gives up instead of opening a clone', async () => {
+  const rec = seed({ mux: 'herdr', pane: 'w5:p5', paneOwner: 'default' });
+  const mux = herdrFake({
+    matches: [{ pane: 'w5:p5', paneOwner: 'default', status: 'idle', stamp: null }],
+    text: 'ed@mac ~/proj % ', cmd: 'zsh',
+  });
+  assert.equal(await dispatchOne(rec, { mux, notifier: () => {} }), 'skipped');
+  assert.equal(mux.calls.windows, 0);
+  assert.equal(readState().sessions[rec.key].status, 'failed');
 });

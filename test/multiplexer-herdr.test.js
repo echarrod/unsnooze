@@ -995,3 +995,8 @@ test('findSessionPanes matches by agent session id across sessions, never by cwd
   assert.deepEqual(await createHerdr({ spawner, env: {} }).findSessionPanes('AAA', { agent: 'codex' }), []);
   assert.ok(!spawner.calls.some(c => c.args.join(' ').includes('--session dead')));
 });
+
+test('findSessionPanes throws when sessions cannot be listed, rather than reporting none', async () => {
+  const spawner = fakeSpawner(() => { throw new Error('socket closed'); });
+  await assert.rejects(createHerdr({ spawner, env: {} }).findSessionPanes('AAA'), /socket closed/);
+});

@@ -637,7 +637,8 @@ const GUI_ORIGIN = /desktop|vscode|jetbrains|ide/i;
 function existingPaneFinder(rec, mux) {
   if (!rec.sessionId) return null;
   if (typeof mux?.findSessionPanes === 'function') return mux;
-  if (rec.mux && rec.mux !== 'herdr') return null;
+  // Transcript records carry the default backend's name but no pane.
+  if (rec.mux && rec.mux !== 'herdr' && rec.pane) return null;
   if (rec.origin && GUI_ORIGIN.test(rec.origin)) return null;
   try {
     const herdr = getMultiplexer('herdr');
@@ -662,12 +663,12 @@ function foreignStamp(hit, rec) {
   return Boolean(hit.stamp) && hit.stamp !== rec.leaseId;
 }
 
-function giveUpOnExistingPane(rec, reason) {
+function giveUpOnExistingPane(rec, reason, notifier = notify) {
   if (!transitionStopEpisode(rec, 'failed', {
     lastError: reason, verifyRetries: 0, resumeEpisodeAt: null,
   }, { expect: ['stopped'] })) return 'stale';
   log(`${rec.key}: ${reason}`);
-  notify('unsnooze needs you ⚠️', `${rec.cwd}: ${reason}`, { context: ctxOf(rec), priority: 4 });
+  notifier('unsnooze needs you ⚠️', `${rec.cwd}: ${reason}`, { context: ctxOf(rec), priority: 4 });
   return 'skipped';
 }
 
@@ -677,7 +678,7 @@ function giveUpOnExistingPane(rec, reason) {
 // identity is then the exact agent session id plus the agent still running in
 // the pane (a shell is refused downstream). Returns { rec, mux } to resume
 // into, a dispatch outcome when this stop ends here, or null to reopen.
-async function adoptExistingPane(rec, agent, mux) {
+async function adoptExistingPane(rec, agent, mux, notifier) {
   const { finder, matches, failed } = await lookupExistingPane(rec, agent, mux);
   if (failed) {
     // Charged as an attempt, so a herdr that keeps failing reaches the normal
@@ -691,14 +692,22 @@ async function adoptExistingPane(rec, agent, mux) {
   if (matches.length > 1) {
     const panes = matches.map(m => `${m.paneOwner}:${m.pane}`).join(', ');
     return { outcome: giveUpOnExistingPane(rec,
-      `found ${matches.length} herdr panes for this session (${panes}) — not guessing, resume it by hand`) };
+      `found ${matches.length} herdr panes for this session (${panes}) — not guessing, resume it by hand`, notifier) };
   }
   const [hit] = matches;
   if (foreignStamp(hit, rec)) {
-    log(`${rec.key}: existing pane ${hit.paneOwner}:${hit.pane} is owned by another unsnooze — deferring to it`);
-    return { outcome: 'busy' };
+    // Not typed into, and charged as an attempt: if that owner never resumes
+    // it, the normal give-up path still ends the stop.
+    if (!transitionStopEpisode(rec, 'stopped', {
+      lastError: `existing pane ${hit.paneOwner}:${hit.pane} is owned by another unsnooze — left to it`,
+    }, { expect: ['stopped'] })) return { outcome: 'stale' };
+    return { outcome: 'retry' };
   }
-  if (hit.pane === rec.pane && hit.paneOwner === rec.paneOwner) return null;
+  // Already pointed at it and it was not safe to resume: a new tab would clone it.
+  if (hit.pane === rec.pane && hit.paneOwner === rec.paneOwner) {
+    return { outcome: giveUpOnExistingPane(rec,
+      `herdr pane ${hit.paneOwner}:${hit.pane} holds this session but is not safe to type into — resume it there by hand`, notifier) };
+  }
   const cutoff = stopEpisodeAt(rec);
   let adopted = null;
   updateState(state => {
@@ -787,17 +796,26 @@ export async function dispatchOne(rec, {
   const notifyContext = () => {
     if (contextNote) notifier('unsnooze: big-context wake', contextNote, { context: ctxOf(rec) });
   };
+  let a = null;
   // Before opening a new tab, look for the conversation's own pane. The
   // retry re-enters with adoptExisting off so it cannot loop.
   const reopenGuarded = async () => {
     // An adopted pane that is not safe to type into (a shell, a refused menu)
     // still holds the conversation: a new tab would clone it.
     if (adopted) {
+      if (!a?.alive) {
+        // Closed between lookup and assessment: retry, the next lookup decides.
+        if (!transitionStopEpisode(rec, 'stopped', {
+          lastError: `existing pane ${rec.paneOwner}:${rec.pane} closed before resume`,
+        }, { expect: ['stopped'] })) return 'stale';
+        return 'retry';
+      }
+      const why = agent.isForegroundCommand(a.cmd) ? 'is not safe to type into' : 'no longer runs the agent';
       return giveUpOnExistingPane(rec,
-        `the agent in herdr pane ${rec.paneOwner}:${rec.pane} has exited — resume it there by hand`);
+        `herdr pane ${rec.paneOwner}:${rec.pane} holds this session but ${why} — resume it there by hand`, notifier);
     }
     if (adoptExisting) {
-      const found = await adoptExistingPane(rec, agent, mux);
+      const found = await adoptExistingPane(rec, agent, mux, notifier);
       if (found?.outcome) return found.outcome;
       if (found) {
         return dispatchOne(found.rec, {
@@ -811,7 +829,7 @@ export async function dispatchOne(rec, {
 
   // Live-pane path: classification comes from the shared assessPane (planFor
   // narrates the identical assessment); dispatch owns every side effect.
-  const a = await assessPane(rec, agent, { mux, matchesLease });
+  a = await assessPane(rec, agent, { mux, matchesLease });
   if (a.alive) {
     if (a.captureError) {
       if (!transitionStopEpisode(rec, 'stopped', {
