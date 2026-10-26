@@ -610,8 +610,8 @@ export async function planFor(rec, {
   if (matches.length === 1) {
     const [hit] = matches;
     if (foreignStamp(hit, rec)) {
-      gates.push(`existing pane ${hit.paneOwner}:${hit.pane} is owned by another unsnooze — deferring to it`);
-      return { ...base, action: 'busy', target: { pane: hit.pane } };
+      gates.push(`existing pane ${hit.paneOwner}:${hit.pane} is owned by another unsnooze — left to it, dispatch counts it as a failed attempt`);
+      return { ...base, action: 'retry', target: { pane: hit.pane } };
     }
     if (hit.status === 'working') {
       gates.push(`existing pane ${hit.paneOwner}:${hit.pane} holds this session and herdr reports it working — deferring`);
